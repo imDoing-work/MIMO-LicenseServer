@@ -11,8 +11,6 @@ import (
 	"os"
 	"time"
 
-	"io/ioutil"
-
 	"mimo-license/model"
 )
 
@@ -57,7 +55,7 @@ func run() error {
     if err != nil {
         return fmt.Errorf("failed to marshal signed license: %w", err)
     }
-    if err := ioutil.WriteFile(OutputFilePath, signedData, 0644); err != nil {
+    if err := os.WriteFile(OutputFilePath, signedData, 0644); err != nil {
         return fmt.Errorf("failed to save signed license: %w", err)
     }
     fmt.Printf("--- 3. Signed License Saved to %s ---\n", OutputFilePath)
