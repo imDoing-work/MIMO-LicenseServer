@@ -9,7 +9,7 @@ lerna-debug.log*
 
 node_modules
 keys
-license.json
+/license.json
 .DS_Store
 dist
 dist-ssr
