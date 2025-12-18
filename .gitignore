@@ -8,8 +8,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-keys
-/license.json
 .DS_Store
 dist
 dist-ssr
@@ -30,3 +28,6 @@ coverage
 *.sw?
 
 *.tsbuildinfo
+
+keys
+license.json
