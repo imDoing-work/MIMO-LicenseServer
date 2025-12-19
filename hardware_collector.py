@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-import glob
 import json
 import subprocess
 import re
@@ -9,44 +8,35 @@ import re
 # 基础工具
 # ============================================================
 
-def read_file(path, default=""):
+def run(cmd):
     try:
-        with open(path) as f:
-            return f.read().strip()
-    except:
-        return default
-
-
-def normalize_pci(addr: str) -> str:
-    addr = addr.lower()
-    if addr.count(":") == 1:
-        return "0000:" + addr
-    return addr
-
-
-# ============================================================
-# Board UUID（优先 sysfs，fallback dmidecode）
-# ============================================================
-
-def get_board_uuid():
-    uuid = read_file("/sys/class/dmi/id/product_uuid")
-    if uuid:
-        return uuid.lower()
-
-    try:
-        out = subprocess.check_output(
-            "dmidecode -t system | grep 'UUID' | awk '{print $2}'",
-            shell=True,
+        return subprocess.check_output(
+            cmd,
             stderr=subprocess.DEVNULL,
             text=True,
         )
-        return out.strip().lower()
-    except:
+    except Exception:
         return ""
 
+def normalize_serial(s: str) -> str:
+    return s.strip().upper()
 
 # ============================================================
-# MAC 地址（等价 getMacAddresses）
+# Board UUID
+# ============================================================
+
+def get_board_uuid():
+    try:
+        with open("/sys/class/dmi/id/product_uuid") as f:
+            return f.read().strip().lower()
+    except:
+        pass
+
+    out = run(["sh", "-c", "dmidecode -t system | grep UUID | awk '{print $2}'"])
+    return out.strip().lower()
+
+# ============================================================
+# MAC 地址
 # ============================================================
 
 def get_mac_addresses():
@@ -56,15 +46,18 @@ def get_mac_addresses():
     for iface in os.listdir("/sys/class/net"):
         if iface == "lo":
             continue
-        addr = read_file(f"/sys/class/net/{iface}/address").lower()
-        if mac_re.match(addr):
-            macs.add(addr)
+        try:
+            with open(f"/sys/class/net/{iface}/address") as f:
+                mac = f.read().strip().lower()
+                if mac_re.match(mac):
+                    macs.add(mac)
+        except:
+            pass
 
     return sorted(macs)
 
-
 # ============================================================
-# Total Memory KB（等价 getTotalMemoryKB）
+# Total Memory KB
 # ============================================================
 
 def get_total_memory_kb():
@@ -77,90 +70,86 @@ def get_total_memory_kb():
         pass
     return 0
 
-
 # ============================================================
-# NVMe 扫描（kernel + SPDK 覆盖）
+# NVMe Serial — SPDK (Primary)
 # ============================================================
 
-def scan_nvme():
-    devices = {}
+def get_nvme_serials_spdk():
+    serials = set()
+    rpc = "/usr/local/mimo/SPDK_for_MIMO/scripts/rpc.py"
 
-    # ---------- Step 1: PCI NVMe ----------
-    for pci in glob.glob("/sys/bus/pci/devices/*"):
-        class_code = read_file(os.path.join(pci, "class"))
-        if class_code != "0x010802":
-            continue
+    out = run([rpc, "bdev_nvme_get_controllers"])
+    if not out:
+        return serials
 
-        pci_addr = normalize_pci(os.path.basename(pci))
-        vendor = read_file(os.path.join(pci, "vendor")).lower()
-
-        devices[pci_addr] = {
-            "vendor": vendor,
-            "capacity": 0,
-        }
-
-        # ---------- kernel nvme ----------
-        nvme_paths = glob.glob(os.path.join(pci, "nvme", "*"))
-        if nvme_paths:
-            nvme = nvme_paths[0]
-            for ns in glob.glob(os.path.join(nvme, "nvme*n*")):
-                sectors = int(read_file(os.path.join(ns, "size"), "0"))
-                sector_size = int(read_file(os.path.join(ns, "queue/hw_sector_size"), "512"))
-                if sectors > 0:
-                    devices[pci_addr]["capacity"] = sectors * 512
-                    break
-
-    # ---------- Step 2: SPDK bdev（覆盖容量） ----------
     try:
-        out = subprocess.check_output(
-            ["/usr/local/mimo/SPDK_for_MIMO/scripts/rpc.py", "bdev_get_bdevs"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        bdevs = json.loads(out)
+        ctrlrs = json.loads(out)
     except:
-        bdevs = []
+        return serials
 
-    for b in bdevs:
-        nvme = b.get("driver_specific", {}).get("nvme")
-        if not nvme:
+    for c in ctrlrs:
+        name = c.get("name")
+        if not name:
             continue
 
-        nv = nvme[0]
-        pci = normalize_pci(nv.get("pci_address", ""))
+        info = run([
+            rpc,
+            "bdev_nvme_get_controller_health_info",
+            "-c", name
+        ])
 
-        if pci in devices:
-            cap = b.get("block_size", 0) * b.get("num_blocks", 0)
-            if cap > 0:
-                devices[pci]["capacity"] = cap
+        if not info:
+            continue
 
-    return devices
+        try:
+            data = json.loads(info)
+            serial = data.get("serial_number")
+            if serial:
+                serials.add(normalize_serial(serial))
+        except:
+            continue
 
+    return serials
 
 # ============================================================
-# 汇总 HardwareBind（最终输出）
+# NVMe Serial — nvme-cli (Fallback)
+# ============================================================
+
+def get_nvme_serials_nvmecli():
+    serials = set()
+
+    out = run(["nvme", "list", "-o", "json"])
+    if not out:
+        return serials
+
+    try:
+        data = json.loads(out)
+    except:
+        return serials
+
+    for dev in data.get("Devices", []):
+        sn = dev.get("SerialNumber")
+        if sn:
+            serials.add(normalize_serial(sn))
+
+    return serials
+
+# ============================================================
+# 汇总 HardwareBind
 # ============================================================
 
 def collect_hardware_bind():
-    nvmes = scan_nvme()
+    serials = get_nvme_serials_spdk()
 
-    vendors = set()
-    total_cap = 0
-
-    for d in nvmes.values():
-        if d["vendor"]:
-            vendors.add(d["vendor"])
-        total_cap += d["capacity"]
+    if not serials:
+        serials = get_nvme_serials_nvmecli()
 
     return {
         "board_uuid": get_board_uuid(),
         "mac_addresses": get_mac_addresses(),
-        "nvme_vendors": sorted(vendors),
-        "total_nvme_cap": total_cap,
-        "nvme_count": len(nvmes),
+        "nvme_serials": sorted(serials),
         "total_memory_kb": get_total_memory_kb(),
     }
-
 
 # ============================================================
 # main

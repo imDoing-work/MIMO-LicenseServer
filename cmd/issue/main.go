@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,7 +30,7 @@ func main() {
 	}
 
 	// --------------------------------------------------
-	// Build payload (STRICTLY matches model)
+	// Build payload (WITHOUT HardwareFP)
 	// --------------------------------------------------
 	payload := license.Payload{
 		LicenseUUID: licenseUUID,
@@ -50,13 +52,14 @@ func main() {
 				"b8:2a:72:db:f3:a7",
 			},
 
-			NvmeVendorOUIs: []string{
-				"0x19e5", // 
+			NvmeSerials: []string{
+				"035AMGD9Q4001341",
+				"035AMGD9Q4021724",
+				"035HAXD9Q4019571",
+				"035HAXD9Q4020228",
 			},
 
-			TotalNvmeCap:  122904191434752,
-			NvmeCount:     4,
-			TotalMemoryKB: 400000000, // 128 GB
+			TotalMemoryKB: 394791660,
 		},
 
 		Features: license.Features{
@@ -64,18 +67,36 @@ func main() {
 		},
 	}
 
-	// --------------------------------------------------
-	// Canonical encode payload (NO JSON indentation issues)
-	// --------------------------------------------------
-	canonical, err := license.EncodePayloadCanonical(payload)
+	// ==================================================
+	// ① Canonical encode HardwareBind ONLY
+	// ==================================================
+	fpBind := license.HardwareFingerprintBind{
+		BoardUUID:   payload.Hardware.BoardUUID,
+		MACs:        payload.Hardware.MACs,
+	}
+	hwCanonical, err := license.EncodeHardwareFingerprintBindCanonical(fpBind)
 	if err != nil {
 		panic(err)
 	}
 
-	// --------------------------------------------------
-	// Sign payload
-	// --------------------------------------------------
-	signature, err := crypto.SignPayload(privKey, canonical)
+	// ==================================================
+	// ② sha256 + base64 → HardwareFP
+	// ==================================================
+	fp := sha256.Sum256(hwCanonical)
+	payload.HardwareFP = base64.StdEncoding.EncodeToString(fp[:])
+
+	// ==================================================
+	// ③ Canonical encode FULL payload (WITH FP)
+	// ==================================================
+	canonicalPayload, err := license.EncodePayloadCanonical(payload)
+	if err != nil {
+		panic(err)
+	}
+
+	// ==================================================
+	// ④ Sign payload
+	// ==================================================
+	signature, err := crypto.SignPayload(privKey, canonicalPayload)
 	if err != nil {
 		panic(err)
 	}
